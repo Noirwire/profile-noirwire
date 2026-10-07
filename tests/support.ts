@@ -1,6 +1,6 @@
 import { readFileSync } from "fs";
 import { join } from "path";
-import * as anchor from "@coral-xyz/anchor";
+import * as anchor from "@anchor-lang/core";
 import {
   Connection,
   Keypair,
@@ -206,6 +206,16 @@ export async function readingAs(reader: Keypair): Promise<Connection> {
     async (message) => nacl.sign.detached(message, reader.secretKey),
   );
   return new Connection(`${PRIVATE_URL}?token=${token}`, "confirmed");
+}
+
+/** The sponsor as it is stored wherever `connection` looks. */
+export async function decodedSponsor(connection: Connection) {
+  const account = await connection.getAccountInfo(SPONSOR);
+  return program.coder.accounts.decode<{
+    admin: PublicKey;
+    pendingAdmin: PublicKey | null;
+    paused: boolean;
+  }>("sponsor", account!.data);
 }
 
 /** A profile as the program stores it, read without the program's own client. */

@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use anchor_lang::prelude::*;
 use ephemeral_rollups_sdk::anchor::ephemeral;
 
@@ -9,14 +11,30 @@ use instructions::*;
 
 declare_id!("AiS6fT2x5XELHvZPrLfdzydC9xUazjS6r4z4bNDTqtHQ");
 
-#[cfg(not(feature = "no-entrypoint"))]
-solana_security_txt::security_txt! {
-    name: "NoirWire Profile",
-    project_url: "https://noirwire.com",
-    contacts: "email:ph1l1ph@proton.me",
-    policy: "https://github.com/Noirwire/profile-noirwire/blob/main/SECURITY.md",
-    preferred_languages: "en",
-    source_code: "https://github.com/Noirwire/profile-noirwire"
+/// The security contact, embedded in the program. `$stamp` is where a build
+/// that knows which release and commit it came from says so.
+macro_rules! security_contact {
+    ($($stamp:ident: $value:expr),*) => {
+        #[cfg(not(feature = "no-entrypoint"))]
+        solana_security_txt::security_txt! {
+            name: "NoirWire Profile",
+            project_url: "https://noirwire.com",
+            contacts: "email:ph1l1ph@proton.me",
+            policy: "https://github.com/Noirwire/profile-noirwire/blob/main/SECURITY.md",
+            preferred_languages: "en",
+            source_code: "https://github.com/Noirwire/profile-noirwire"
+            $(, $stamp: $value)*
+        }
+    };
+}
+
+#[cfg(not(source_stamped))]
+security_contact! {}
+
+#[cfg(source_stamped)]
+security_contact! {
+    source_release: env!("SOURCE_RELEASE"),
+    source_revision: env!("SOURCE_REVISION")
 }
 
 #[ephemeral]
@@ -31,8 +49,19 @@ pub mod noirwire_profile {
         instructions::initialize_sponsor(ctx, settings)
     }
 
-    pub fn update_sponsor(ctx: Context<UpdateSponsor>, settings: SponsorSettings) -> Result<()> {
+    pub fn update_sponsor(
+        ctx: Context<AdministerSponsor>,
+        settings: SponsorSettings,
+    ) -> Result<()> {
         instructions::update_sponsor(ctx, settings)
+    }
+
+    pub fn nominate_admin(ctx: Context<AdministerSponsor>, nominee: Option<Pubkey>) -> Result<()> {
+        instructions::nominate_admin(ctx, nominee)
+    }
+
+    pub fn accept_admin(ctx: Context<AcceptAdmin>) -> Result<()> {
+        instructions::accept_admin(ctx)
     }
 
     pub fn delegate_sponsor(ctx: Context<DelegateSponsor>, validator: Pubkey) -> Result<()> {

@@ -18,11 +18,14 @@ SHELL := /bin/bash
 .SHELLFLAGS := -euo pipefail -c
 .DEFAULT_GOAL := help
 
-# The Anchor version this program is built with. Where avm has it installed
-# it is used directly, whatever version avm currently points at.
-ANCHOR_VERSION := 1.0.2
+# The Anchor version this program is built with, the same as the anchor-lang
+# crate. Where avm has it installed it is used directly, whatever version avm
+# currently points at. Any other version is refused, not quietly used.
+ANCHOR_VERSION := 1.2.1
 AVM_ANCHOR := $(HOME)/.avm/bin/anchor-$(ANCHOR_VERSION)
 ANCHOR ?= $(if $(wildcard $(AVM_ANCHOR)),$(AVM_ANCHOR),anchor)
+SBPF_ARCH := v0
+SOLANA_VERIFY_VERSION := 0.5.2
 
 LOCALNET := .localnet
 PROGRAM_ID := $(shell sed -n 's/^noirwire_profile = "\(.*\)"/\1/p' Anchor.toml)
@@ -41,7 +44,7 @@ STACK = cd $(LOCALNET) && exec npx mb-stack --reset --ledger ledger \
 	--upgradeable-program $(PROGRAM_ID) ../$(PROGRAM_SO) \
 		$$(solana-keygen pubkey admin.json)
 
-.PHONY: help install build fresh stack test check format audit verify-build clean
+.PHONY: help install build pinned-anchor fresh stack test check format audit verify-build clean
 
 help:
 	@grep -E '^#( |$$)' Makefile | sed -E 's/^# ?//' | sed '/^The Anchor version/,$$d'
@@ -51,8 +54,16 @@ install:
 
 # The program's address is the one it declares. Its keypair is needed only
 # to deploy and is not in this repository, so the build does not look for it.
-build:
-	$(ANCHOR) build --ignore-keys
+#
+# Anchor $(ANCHOR_VERSION) builds for the newest program format (v3) unless
+# told otherwise. The local validators do not load it ("Program is not
+# deployed"), so the format every validator loads is asked for by name.
+build: pinned-anchor
+	$(ANCHOR) build --ignore-keys --arch $(SBPF_ARCH)
+
+pinned-anchor:
+	@[ "$$($(ANCHOR) --version 2>/dev/null)" = "anchor-cli $(ANCHOR_VERSION)" ] || { \
+		echo "This program builds with Anchor $(ANCHOR_VERSION) only: run 'avm install $(ANCHOR_VERSION)'." >&2; exit 1; }
 
 $(ADMIN_KEY):
 	mkdir -p $(LOCALNET)
@@ -91,10 +102,13 @@ format:
 audit:
 	cargo audit
 
-# Needs Docker and solana-verify (cargo install solana-verify --locked).
+# Needs Docker and solana-verify at the pinned version
+# (cargo install solana-verify --locked --version 0.5.2).
 # The hash it prints is the one to compare with the deployed program.
 verify-build:
-	solana-verify build --library-name noirwire_profile
+	@[ "$$(solana-verify --version 2>/dev/null)" = "solana-verify $(SOLANA_VERIFY_VERSION)" ] || { \
+		echo "This build is verified with solana-verify $(SOLANA_VERIFY_VERSION) only: run 'cargo install solana-verify --locked --version $(SOLANA_VERIFY_VERSION)'." >&2; exit 1; }
+	solana-verify build --library-name noirwire_profile --arch $(SBPF_ARCH)
 	solana-verify get-executable-hash $(PROGRAM_SO)
 
 clean:

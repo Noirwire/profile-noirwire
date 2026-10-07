@@ -27,6 +27,7 @@ Checked by the program, and proven by the tests on a local network:
 - While paused, nothing is created or written. An owner can still close their own profile.
 - The permission account is the one address the permission program derives for that profile. Any other is refused.
 - Only the program's upgrade authority can set up the sponsor. Only the sponsor's admin can change its settings, move it or pay it out, and never below its own rent.
+- The admin role moves in two steps: the admin names a successor, and the successor takes the role by signing. Until then nothing changes, and afterwards the old admin can do nothing. Tested on Solana and on the rollup.
 
 Not this program's to guarantee:
 
@@ -48,7 +49,7 @@ programs/noirwire-profile/src/
   lib.rs                   the instruction list and the embedded security contact
   state.rs                 the two accounts, their seeds and their pure rules
   errors.rs                what a caller did wrong, by name
-  instructions/sponsor.rs  set up, change, move and pay out the sponsor
+  instructions/sponsor.rs  set up, change, hand over, move and pay out the sponsor
   instructions/profile.rs  create, write and close a profile
 tests/
   profile.test.ts          the behaviour, as sentences
@@ -58,11 +59,11 @@ Makefile                   the only entry point
 
 ### Accounts
 
-| Account    | Address                                                       | Lives on                         | Holds                                                                                   |
-| ---------- | ------------------------------------------------------------- | -------------------------------- | --------------------------------------------------------------------------------------- |
-| Sponsor    | seeds `["sponsor"]`                                           | Solana, then delegated to rollup | bump, admin, gate, `max_data_len` (u16), paused. 76 bytes with its discriminator        |
-| Profile    | seeds `["profile", owner]`                                    | the rollup only                  | layout (1), bump, owner, revision (u64), data (u32 length, then bytes). 54 bytes + data |
-| Permission | seeds `["permission:", profile]` under the permission program | the rollup only                  | the one member allowed to read the profile: its owner                                   |
+| Account    | Address                                                       | Lives on                         | Holds                                                                                                       |
+| ---------- | ------------------------------------------------------------- | -------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| Sponsor    | seeds `["sponsor"]`                                           | Solana, then delegated to rollup | bump, admin, pending admin (optional), gate, `max_data_len` (u16), paused. 109 bytes with its discriminator |
+| Profile    | seeds `["profile", owner]`                                    | the rollup only                  | layout (1), bump, owner, revision (u64), data (u32 length, then bytes). 54 bytes + data                     |
+| Permission | seeds `["permission:", profile]` under the permission program | the rollup only                  | the one member allowed to read the profile: its owner                                                       |
 
 Profile bytes: 0-7 discriminator, 8 layout, 9 bump, 10-41 owner, 42-49 revision (little endian), 50-53 data length (little endian), 54 onwards data.
 
@@ -72,6 +73,8 @@ Profile bytes: 0-7 discriminator, 8 layout, 9 bump, 10-41 owner, 42-49 revision 
 | -------------------- | -------------------------- | ------------------------- | ---------------------------------------------------------------------------------- |
 | `initialize_sponsor` | Solana                     | program upgrade authority | Creates the sponsor with its settings. The signer becomes its admin                |
 | `update_sponsor`     | wherever the sponsor lives | admin                     | Sets the gate, the size limit (1 to 4096 bytes) and the pause                      |
+| `nominate_admin`     | wherever the sponsor lives | admin                     | Offers the admin role to a key, replacing any earlier offer. No key withdraws it   |
+| `accept_admin`       | wherever the sponsor lives | the nominated key         | Makes the nominee the admin. The admin before it keeps nothing                     |
 | `delegate_sponsor`   | Solana                     | admin                     | Moves the sponsor and its balance to the rollup run by the given validator         |
 | `undelegate_sponsor` | the rollup                 | admin                     | Brings the sponsor back to Solana with what it has left                            |
 | `withdraw_sponsor`   | Solana                     | admin                     | Pays the admin from the undelegated sponsor, never below the sponsor's own rent    |
@@ -83,13 +86,26 @@ The sponsor is funded with a plain system transfer to its address while it is on
 
 The account order and the discriminators of the three profile instructions, the seeds and the profile layout are relied on by the wallet apps and do not change. The interface file is `target/idl/noirwire_profile.json` after a build.
 
-### What a profile costs
+### How large a record may be, and what it costs
 
-The rollup charges `(size + 60) * 32` lamports of rent per account, and returns it when the account is closed. A 300-byte record is a 354-byte profile and a 101-byte permission: 13,248 + 5,152 = **18,400 lamports**, measured by the tests, paid by the sponsor and returned to it on close. Growing or shrinking a record moves 32 lamports per byte. Neither the owner nor the gate needs any SOL on the rollup.
+A record may be as large as the deployment's `max_data_len`, which the admin sets between 1 and 4,096 bytes. The tests run with a limit of 2,048 and write a 2,000-byte record in one transaction.
+
+Such a record does not fit a standard Solana transaction, which stops at 1,232 bytes. The rollup takes the larger one, but the usual client libraries refuse to build it, so a client serialises and signs the larger transaction itself. `tests/support.ts` does exactly that. Limits above 2,048 are not exercised by the tests.
+
+The rollup charges `(size + 60) * 32` lamports of rent per account, and returns it when the account is closed. Both figures are measured by the tests:
+
+| Record      | Profile account | Permission account | Rent, paid by the sponsor |
+| ----------- | --------------- | ------------------ | ------------------------- |
+| 300 bytes   | 354 bytes       | 101 bytes          | **18,400 lamports**       |
+| 2,000 bytes | 2,054 bytes     | 101 bytes          | **72,800 lamports**       |
+
+Growing or shrinking a record moves 32 lamports per byte. All of it returns to the sponsor on close. Neither the owner nor the gate needs any SOL on the rollup.
 
 ## Build and test
 
-You need Rust (the version in `rust-toolchain.toml` is picked up by itself), the Solana CLI 2.3.11, Anchor 1.0.2 and Node 26. With `avm`, `make` uses `anchor-1.0.2` directly whatever version is active.
+You need Rust (the version in `rust-toolchain.toml` is picked up by itself), the Solana CLI 2.3.11, Anchor 1.2.1 and Node 26. The Anchor CLI, the `anchor-lang` crate and the test client `@anchor-lang/core` are all 1.2.1. With `avm`, `make` uses `anchor-1.2.1` directly whatever version is active, and refuses to build with any other version: run `avm install 1.2.1`.
+
+Anchor 1.2.1 builds for the newest program format (SBPF v3) by default, and the local validators answer "Program is not deployed" to it. `make build` therefore asks for `--arch v0`, which they load.
 
 ```sh
 git clone https://github.com/Noirwire/profile-noirwire.git
@@ -116,28 +132,37 @@ CI runs the same targets on every push and pull request: `make check`, `make aud
 
 Nothing here deploys by itself. These are the steps, in order, for devnet first and then mainnet. The program keypair and every other key stay outside this repository.
 
-1. **Build reproducibly.** `make verify-build` builds in a container and prints the hash of the program. Deploy that file, not a local build.
+1. **Build reproducibly**, from the commit being released, with `solana-verify` 0.5.2 (`cargo install solana-verify --locked --version 0.5.2`; `make verify-build` refuses any other). It builds in a container and prints the hash of the program. Deploy that file, not a local build, then tie the deployed program to the commit by name.
 
    ```sh
+   git checkout <commit>
    make verify-build
    solana program deploy -u devnet target/deploy/noirwire_profile.so --program-id <program keypair>
    solana-verify verify-from-repo -u devnet --program-id AiS6fT2x5XELHvZPrLfdzydC9xUazjS6r4z4bNDTqtHQ \
-     --library-name noirwire_profile https://github.com/Noirwire/profile-noirwire
+     --library-name noirwire_profile --arch v0 --commit-hash <commit> https://github.com/Noirwire/profile-noirwire
    ```
 
-2. **Set up the sponsor**, with the deploy key, while it is still the upgrade authority. `initialize_sponsor` makes the signer the sponsor's admin for good; there is no instruction to change the admin. The admin signs on the rollup to pause and to undelegate, so it must be an ordinary key that can sign there.
+   Leave `SOURCE_RELEASE` and `SOURCE_REVISION` unset for this build. Setting both writes `source_release` and `source_revision` into the embedded `security.txt`, which changes the program's bytes; a verifier rebuilding the commit without them would get another hash. They are for builds that are not verified this way.
+
+2. **Set up the sponsor**, with the deploy key, while it is still the upgrade authority: only the upgrade authority may initialize, and the signer becomes the sponsor's admin.
    - `initialize_sponsor({ gate, max_data_len, paused: false })` on Solana.
-   - Fund it: a plain transfer to the sponsor's address, `solana transfer <sponsor> <amount>`. Budget 18,400 lamports per 300-byte profile.
+   - Fund it: a plain transfer to the sponsor's address, `solana transfer <sponsor> <amount>`. Budget 18,400 lamports per 300-byte profile and 72,800 per 2,000-byte one.
    - `delegate_sponsor(validator)` on Solana. `validator` is the identity of the private rollup validator for that network, from MagicBlock's documentation. Check it against `getIdentity` on the rollup's own endpoint before sending. The program does not store it and cannot check it for you.
 
-3. **Hand the upgrade authority to a multisig.** Squads is the common choice.
+3. **Hand over the admin role**, so the deploy key keeps nothing. `nominate_admin(new admin)` signed by the deploy key, then `accept_admin` signed by the new admin. Both go to wherever the sponsor lives. An offer made by mistake is replaced by nominating again, or withdrawn by nominating nobody.
+
+   What was tested: the hand-over between ordinary keys, on Solana before delegation and on the rollup while delegated; that a stranger can neither nominate nor accept; that a nominee who did not sign is refused; that the old admin can no longer change settings, nominate, withdraw, delegate or undelegate; that the new admin can pause; and that an offer made on the rollup is still there when the sponsor returns to Solana.
+
+   What was not tested: a multisig as admin. Pausing and undelegating are signed by the admin on the rollup, and whether a multisig can sign there has not been tried. Two ways to stay on tested ground: make the multisig the admin while the sponsor is on Solana, where it nominates, accepts, delegates and withdraws like any signer, and try a pause from it on devnet before relying on it; or keep an ordinary key as admin for the rollup and give the multisig the upgrade authority only.
+
+4. **Hand the upgrade authority to a multisig.** Squads is the common choice.
 
    ```sh
    solana program set-upgrade-authority AiS6fT2x5XELHvZPrLfdzydC9xUazjS6r4z4bNDTqtHQ \
      --new-upgrade-authority <multisig vault> --skip-new-upgrade-authority-signer-check
    ```
 
-4. **Repeat on mainnet** once devnet behaves, with a mainnet gate key and the mainnet validator.
+5. **Repeat on mainnet** once devnet behaves, with a mainnet gate key and the mainnet validator. Before the first deploy on either network, confirm which program format its validators load; this repository builds `--arch v0`.
 
 This repository ships no admin command line. The sponsor instructions are sent with any Anchor client built from the interface file, exactly as `tests/profile.test.ts` does:
 
@@ -160,11 +185,11 @@ The gate is an ordinary keypair made for this purpose and held only by the servi
 
 Fund the sponsor only while it is on Solana. What happens to lamports sent to its address while it is delegated is not covered by the tests. The procedure, which the tests run end to end with a profile left open:
 
-1. `undelegate_sponsor`, sent to the rollup. Wait until the sponsor's owner on Solana is this program again (about nine seconds on the local stack).
+1. `undelegate_sponsor`, sent to the rollup. Wait until the sponsor's owner on Solana is this program again (between one and nine seconds in local runs).
 2. Transfer SOL to the sponsor's address on Solana.
 3. `delegate_sponsor(validator)` on Solana.
 
-While the sponsor is away, existing profiles stay readable by their owners, and every create, write and close is refused by the rollup, because the sponsor is not writable there. Profiles that were open before are readable and writable again afterwards, and new ones can be created. On the local stack the whole procedure takes about ten seconds. Expect longer on a public network, and do it at a quiet hour.
+While the sponsor is away, existing profiles stay readable by their owners, and every create, write and close is refused by the rollup, because the sponsor is not writable there. Profiles that were open before are readable and writable again afterwards, and new ones can be created. On the local stack the whole procedure takes a few seconds. Expect longer on a public network, and do it at a quiet hour.
 
 To take SOL out, undelegate and call `withdraw_sponsor(lamports)` on Solana. It is refused on the rollup.
 

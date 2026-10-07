@@ -6,7 +6,7 @@ import {
   PublicKey,
   TransactionInstruction,
 } from "@solana/web3.js";
-import { BN } from "@coral-xyz/anchor";
+import { BN } from "@anchor-lang/core";
 import { permissionPdaFromAccount } from "@magicblock-labs/ephemeral-rollups-sdk";
 import {
   PRIVATE_URL,
@@ -18,6 +18,7 @@ import {
   airdropped,
   base,
   decodedProfile,
+  decodedSponsor,
   profileAccounts,
   profileOf,
   program,
@@ -87,6 +88,132 @@ const withdraw = (by: PublicKey, lamports: number) =>
     .withdrawSponsor(new BN(lamports))
     .accountsPartial(asAdmin(by))
     .instruction();
+
+const nominate = (by: PublicKey, nominee: PublicKey | null) =>
+  program.methods
+    .nominateAdmin(nominee)
+    .accountsPartial(asAdmin(by))
+    .instruction();
+
+const accept = (nominee: PublicKey) =>
+  program.methods
+    .acceptAdmin()
+    .accountsPartial({ nominee, sponsor: SPONSOR })
+    .instruction();
+
+/** The same instruction, no longer asking for `key`'s signature. */
+function unsignedBy(
+  instruction: TransactionInstruction,
+  key: PublicKey,
+): TransactionInstruction {
+  instruction.keys = instruction.keys.map((meta) =>
+    meta.pubkey.equals(key) ? { ...meta, isSigner: false } : meta,
+  );
+  return instruction;
+}
+
+/**
+ * The hand-over of the admin role, wherever the sponsor lives. `powers` are
+ * the instructions only an admin may send there.
+ */
+function handsOverItsAdminRole(
+  connection: Connection,
+  powers: (by: PublicKey) => Promise<TransactionInstruction>[],
+) {
+  const heir = Keypair.generate();
+  const adminIs = async (key: Keypair) =>
+    expect((await decodedSponsor(connection)).admin.equals(key.publicKey)).to.be
+      .true;
+
+  before(() => airdropped(heir.publicKey, 1));
+
+  it("offers its admin role only through its admin, and gives it only to a nominee who signs", async () => {
+    expect(
+      await refusal(
+        send(
+          connection,
+          await nominate(stranger.publicKey, stranger.publicKey),
+          stranger,
+        ),
+      ),
+    ).to.include("NotAdmin");
+
+    await send(
+      connection,
+      await nominate(admin.publicKey, heir.publicKey),
+      admin,
+    );
+    expect(
+      await refusal(
+        send(connection, await accept(stranger.publicKey), stranger),
+      ),
+    ).to.include("NotNominee");
+    expect(
+      await refusal(
+        send(
+          connection,
+          unsignedBy(await accept(heir.publicKey), heir.publicKey),
+          stranger,
+        ),
+      ),
+    ).to.include("AccountNotSigner");
+    await adminIs(admin);
+  });
+
+  it("keeps its admin when the offer is withdrawn or made to another key", async () => {
+    // Each attempt is paid for by a different key. The rollup takes two
+    // byte-identical transactions sent in the same moment for one.
+    for (const [nominee, feePayer] of [
+      [null, stranger],
+      [stranger.publicKey, admin],
+    ] as const) {
+      await send(connection, await nominate(admin.publicKey, nominee), admin);
+      expect(
+        await refusal(
+          send(connection, await accept(heir.publicKey), feePayer, [heir]),
+        ),
+      ).to.include("NotNominee");
+    }
+    await adminIs(admin);
+  });
+
+  it("leaves the old admin no power once the nominee accepts, and the new admin can pause", async () => {
+    await send(
+      connection,
+      await nominate(admin.publicKey, heir.publicKey),
+      stranger,
+      [admin],
+    );
+    await send(connection, await accept(heir.publicKey), heir);
+    await adminIs(heir);
+    expect((await decodedSponsor(connection)).pendingAdmin).to.equal(null);
+
+    for (const power of powers(admin.publicKey)) {
+      expect(await refusal(send(connection, await power, admin))).to.include(
+        "NotAdmin",
+      );
+    }
+
+    for (const paused of [true, false]) {
+      await send(
+        connection,
+        await update(heir.publicKey, settings({ paused })),
+        heir,
+      );
+      expect((await decodedSponsor(connection)).paused).to.equal(paused);
+    }
+  });
+
+  it("is handed back the same way", async () => {
+    await send(
+      connection,
+      await nominate(heir.publicKey, admin.publicKey),
+      heir,
+    );
+    await send(connection, await accept(admin.publicKey), admin);
+    await adminIs(admin);
+  });
+}
 
 type ProfileAccounts = ReturnType<typeof profileAccounts>;
 
@@ -205,6 +332,13 @@ describe("the sponsor, on Solana", () => {
       (await sponsorRent()) + SPONSOR_FUNDING,
     );
   });
+
+  handsOverItsAdminRole(base, (by) => [
+    update(by, settings({ paused: true })),
+    nominate(by, by),
+    withdraw(by, 1),
+    delegate(by),
+  ]);
 
   it("is delegated to the rollup only by its admin, with its whole balance", async () => {
     const error = await refusal(
@@ -338,9 +472,8 @@ describe("a profile, on the rollup", () => {
     const before = await sponsorOnRollup();
     await send(rollup, await write(owner.publicKey, 1, larger), gate, [owner]);
 
-    expect(before - (await sponsorOnRollup())).to.equal(
-      (larger.length - first.length) * 32,
-    );
+    expect(before - (await sponsorOnRollup())).to.equal(72_800 - 18_400);
+    expect(profileCost(larger.length)).to.equal(72_800);
     let stored = await decodedProfile(rollup, owner.publicKey);
     expect(stored?.revision).to.equal(2n);
     expect(stored?.data.equals(larger)).to.equal(true);
@@ -457,6 +590,14 @@ describe("a profile, on the rollup", () => {
   });
 });
 
+describe("the sponsor, while it is on the rollup", () => {
+  handsOverItsAdminRole(rollup, (by) => [
+    update(by, settings({ paused: true })),
+    nominate(by, by),
+    undelegate(by),
+  ]);
+});
+
 describe("the sponsor, topped up on Solana while a profile stays open", () => {
   const owner = Keypair.generate();
   const newcomer = Keypair.generate();
@@ -481,11 +622,18 @@ describe("the sponsor, topped up on Solana while a profile stays open", () => {
     expect(await sponsorOnRollup()).to.equal(funded - profileCost(kept.length));
   });
 
-  it("returns to Solana with everything but the rent of the open profile", async () => {
+  it("returns to Solana with everything but the rent of the open profile, and with what its admin decided on the rollup", async () => {
+    await send(
+      rollup,
+      await nominate(admin.publicKey, newcomer.publicKey),
+      admin,
+    );
     await send(rollup, await undelegate(admin.publicKey), admin);
     await sponsorIsBackOnSolana();
 
     expect(await sponsorOnSolana()).to.equal(funded - profileCost(kept.length));
+    const { pendingAdmin } = await decodedSponsor(base);
+    expect(pendingAdmin?.equals(newcomer.publicKey)).to.equal(true);
   });
 
   it("leaves the open profile readable while it is away, and nothing can be created, written or closed", async () => {

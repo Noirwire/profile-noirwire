@@ -23,8 +23,11 @@ pub const HARD_MAX_DATA_LEN: u16 = 4096;
 #[derive(InitSpace)]
 pub struct Sponsor {
     pub bump: u8,
-    /// May change the settings, delegate, undelegate and withdraw.
+    /// May change the settings, delegate, undelegate, withdraw and name a successor.
     pub admin: Pubkey,
+    /// The key the admin has offered the role to. It becomes the admin only
+    /// by signing its acceptance, so the role cannot be sent to a key nobody holds.
+    pub pending_admin: Option<Pubkey>,
     /// Must sign every instruction that can spend rent. Held by the service
     /// that rate limits profile creation, so a stranger cannot drain the sponsor.
     pub gate: Pubkey,

@@ -31,4 +31,6 @@ pub enum ProfileError {
     BelowRent,
     #[msg("Arithmetic overflow")]
     Overflow,
+    #[msg("Only the key the admin nominated may accept the role")]
+    NotNominee,
 }

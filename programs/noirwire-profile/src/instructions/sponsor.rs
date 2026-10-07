@@ -62,11 +62,15 @@ pub fn initialize_sponsor(
     let sponsor = &mut ctx.accounts.sponsor;
     sponsor.bump = ctx.bumps.sponsor;
     sponsor.admin = ctx.accounts.admin.key();
+    sponsor.pending_admin = None;
     settings.apply_to(sponsor)
 }
 
+/// The admin and the sponsor, for the instructions that only change what the
+/// sponsor stores. They are sent to wherever the sponsor lives at the time:
+/// the rollup while delegated, Solana otherwise.
 #[derive(Accounts)]
-pub struct UpdateSponsor<'info> {
+pub struct AdministerSponsor<'info> {
     pub admin: Signer<'info>,
     #[account(
         mut,
@@ -77,10 +81,36 @@ pub struct UpdateSponsor<'info> {
     pub sponsor: Account<'info, Sponsor>,
 }
 
-/// Changes the gate, the size limit or the pause. Sent to wherever the
-/// sponsor lives at the time: the rollup while delegated, Solana otherwise.
-pub fn update_sponsor(ctx: Context<UpdateSponsor>, settings: SponsorSettings) -> Result<()> {
+/// Changes the gate, the size limit or the pause.
+pub fn update_sponsor(ctx: Context<AdministerSponsor>, settings: SponsorSettings) -> Result<()> {
     settings.apply_to(&mut ctx.accounts.sponsor)
+}
+
+/// Offers the admin role to `nominee`, replacing any earlier offer. `None`
+/// withdraws it. Nothing changes hands until the nominee accepts.
+pub fn nominate_admin(ctx: Context<AdministerSponsor>, nominee: Option<Pubkey>) -> Result<()> {
+    ctx.accounts.sponsor.pending_admin = nominee;
+    Ok(())
+}
+
+#[derive(Accounts)]
+pub struct AcceptAdmin<'info> {
+    pub nominee: Signer<'info>,
+    #[account(
+        mut,
+        seeds = [SPONSOR_SEED],
+        bump = sponsor.bump,
+        constraint = sponsor.pending_admin == Some(nominee.key()) @ ProfileError::NotNominee
+    )]
+    pub sponsor: Account<'info, Sponsor>,
+}
+
+/// Makes the nominee the admin. The admin before it keeps nothing.
+pub fn accept_admin(ctx: Context<AcceptAdmin>) -> Result<()> {
+    let sponsor = &mut ctx.accounts.sponsor;
+    sponsor.admin = ctx.accounts.nominee.key();
+    sponsor.pending_admin = None;
+    Ok(())
 }
 
 #[delegate]
