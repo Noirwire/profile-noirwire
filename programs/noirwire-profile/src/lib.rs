@@ -11,30 +11,14 @@ use instructions::*;
 
 declare_id!("AiS6fT2x5XELHvZPrLfdzydC9xUazjS6r4z4bNDTqtHQ");
 
-/// The security contact, embedded in the program. `$stamp` is where a build
-/// that knows which release and commit it came from says so.
-macro_rules! security_contact {
-    ($($stamp:ident: $value:expr),*) => {
-        #[cfg(not(feature = "no-entrypoint"))]
-        solana_security_txt::security_txt! {
-            name: "NoirWire Profile",
-            project_url: "https://noirwire.com",
-            contacts: "email:ph1l1ph@proton.me",
-            policy: "https://github.com/Noirwire/profile-noirwire/blob/main/SECURITY.md",
-            preferred_languages: "en",
-            source_code: "https://github.com/Noirwire/profile-noirwire"
-            $(, $stamp: $value)*
-        }
-    };
-}
-
-#[cfg(not(source_stamped))]
-security_contact! {}
-
-#[cfg(source_stamped)]
-security_contact! {
-    source_release: env!("SOURCE_RELEASE"),
-    source_revision: env!("SOURCE_REVISION")
+#[cfg(not(feature = "no-entrypoint"))]
+solana_security_txt::security_txt! {
+    name: "NoirWire Profile",
+    project_url: "https://noirwire.com",
+    contacts: "email:ph1l1ph@proton.me",
+    policy: "https://github.com/Noirwire/profile-noirwire/blob/main/SECURITY.md",
+    preferred_languages: "en",
+    source_code: "https://github.com/Noirwire/profile-noirwire"
 }
 
 #[ephemeral]

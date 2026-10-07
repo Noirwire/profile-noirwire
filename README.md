@@ -142,8 +142,6 @@ Nothing here deploys by itself. These are the steps, in order, for devnet first 
      --library-name noirwire_profile --arch v0 --commit-hash <commit> https://github.com/Noirwire/profile-noirwire
    ```
 
-   Leave `SOURCE_RELEASE` and `SOURCE_REVISION` unset for this build. Setting both writes `source_release` and `source_revision` into the embedded `security.txt`, which changes the program's bytes; a verifier rebuilding the commit without them would get another hash. They are for builds that are not verified this way.
-
 2. **Set up the sponsor**, with the deploy key, while it is still the upgrade authority: only the upgrade authority may initialize, and the signer becomes the sponsor's admin.
    - `initialize_sponsor({ gate, max_data_len, paused: false })` on Solana.
    - Fund it: a plain transfer to the sponsor's address, `solana transfer <sponsor> <amount>`. Budget 18,400 lamports per 300-byte profile and 72,800 per 2,000-byte one.
