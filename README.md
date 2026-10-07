@@ -142,6 +142,8 @@ Nothing here deploys by itself. These are the steps, in order, for devnet first 
      --library-name noirwire_profile --arch v0 --commit-hash <commit> https://github.com/Noirwire/profile-noirwire
    ```
 
+   What was not tested: the reproducible build itself has not completed once. The build image for Solana 2.3.11 carries a Cargo too old for one of this program's dependencies and stops there, so `make verify-build` needs a newer base image named with `solana-verify build --base-image`, and that image, and the hash it gives twice in a row, are still to be established. Do this before the first deploy; until it is done the deployed program cannot be tied to a commit.
+
 2. **Set up the sponsor**, with the deploy key, while it is still the upgrade authority: only the upgrade authority may initialize, and the signer becomes the sponsor's admin.
    - `initialize_sponsor({ gate, max_data_len, paused: false })` on Solana.
    - Fund it: a plain transfer to the sponsor's address, `solana transfer <sponsor> <amount>`. Budget 18,400 lamports per 300-byte profile and 72,800 per 2,000-byte one.
