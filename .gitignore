@@ -13,3 +13,8 @@ test-ledger
 .deploy-wallet.json
 *-keypair.json
 id.json
+
+# Local test network: throwaway keys, ledgers and logs.
+.localnet
+magicblock-test-storage
+mb-stack.log

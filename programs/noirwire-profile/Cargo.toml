@@ -1,0 +1,31 @@
+[package]
+name = "noirwire-profile"
+version = "0.1.0"
+description = "Keeps a NoirWire wallet's own labels, as ciphertext, on a private rollup"
+edition = "2021"
+license = "UNLICENSED"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "noirwire_profile"
+
+[features]
+default = []
+cpi = ["no-entrypoint"]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+idl-build = ["anchor-lang/idl-build"]
+anchor-debug = []
+custom-heap = []
+custom-panic = []
+
+[dependencies]
+anchor-lang = "=1.0.2"
+ephemeral-rollups-sdk = { version = "=0.16.2", features = ["anchor", "access-control"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(target_os, values("solana"))',
+] }
