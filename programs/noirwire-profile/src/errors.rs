@@ -1,5 +1,6 @@
 use anchor_lang::prelude::*;
 
+/// Clients match these by name or by number, so a new one goes at the end.
 #[error_code]
 pub enum ProfileError {
     #[msg("Only the program's upgrade authority may set up the sponsor")]
@@ -26,8 +27,6 @@ pub enum ProfileError {
     StaleRevision,
     #[msg("The profile was written by a newer program layout")]
     UnknownLayout,
-    #[msg("The amount is zero")]
-    ZeroAmount,
     #[msg("The sponsor must keep its own rent")]
     BelowRent,
     #[msg("Arithmetic overflow")]

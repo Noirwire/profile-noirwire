@@ -1,5 +1,3 @@
-#![allow(ambiguous_glob_reexports)]
-
 use anchor_lang::prelude::*;
 use ephemeral_rollups_sdk::anchor::ephemeral;
 
@@ -7,11 +5,19 @@ pub mod errors;
 pub mod instructions;
 pub mod state;
 
-pub use errors::*;
-pub use instructions::*;
-pub use state::*;
+use instructions::*;
 
 declare_id!("AiS6fT2x5XELHvZPrLfdzydC9xUazjS6r4z4bNDTqtHQ");
+
+#[cfg(not(feature = "no-entrypoint"))]
+solana_security_txt::security_txt! {
+    name: "NoirWire Profile",
+    project_url: "https://noirwire.com",
+    contacts: "email:ph1l1ph@proton.me",
+    policy: "https://github.com/Noirwire/profile-noirwire/blob/main/SECURITY.md",
+    preferred_languages: "en",
+    source_code: "https://github.com/Noirwire/profile-noirwire"
+}
 
 #[ephemeral]
 #[program]
@@ -21,29 +27,24 @@ pub mod noirwire_profile {
     pub fn initialize_sponsor(
         ctx: Context<InitializeSponsor>,
         settings: SponsorSettings,
-        lamports: u64,
     ) -> Result<()> {
-        instructions::initialize_sponsor(ctx, settings, lamports)
-    }
-
-    pub fn fund_sponsor(ctx: Context<FundSponsor>, lamports: u64) -> Result<()> {
-        instructions::fund_sponsor(ctx, lamports)
+        instructions::initialize_sponsor(ctx, settings)
     }
 
     pub fn update_sponsor(ctx: Context<UpdateSponsor>, settings: SponsorSettings) -> Result<()> {
         instructions::update_sponsor(ctx, settings)
     }
 
-    pub fn withdraw_sponsor(ctx: Context<WithdrawSponsor>, lamports: u64) -> Result<()> {
-        instructions::withdraw_sponsor(ctx, lamports)
-    }
-
-    pub fn delegate_sponsor(ctx: Context<DelegateSponsor>) -> Result<()> {
-        instructions::delegate_sponsor(ctx)
+    pub fn delegate_sponsor(ctx: Context<DelegateSponsor>, validator: Pubkey) -> Result<()> {
+        instructions::delegate_sponsor(ctx, validator)
     }
 
     pub fn undelegate_sponsor(ctx: Context<UndelegateSponsor>) -> Result<()> {
         instructions::undelegate_sponsor(ctx)
+    }
+
+    pub fn withdraw_sponsor(ctx: Context<WithdrawSponsor>, lamports: u64) -> Result<()> {
+        instructions::withdraw_sponsor(ctx, lamports)
     }
 
     pub fn create_profile(ctx: Context<CreateProfile>, data: Vec<u8>) -> Result<()> {

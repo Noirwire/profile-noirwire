@@ -4,9 +4,10 @@ import {
   Keypair,
   LAMPORTS_PER_SOL,
   PublicKey,
-  SystemProgram,
+  TransactionInstruction,
 } from "@solana/web3.js";
 import { BN } from "@coral-xyz/anchor";
+import { permissionPdaFromAccount } from "@magicblock-labs/ephemeral-rollups-sdk";
 import {
   PRIVATE_URL,
   PROGRAM_DATA,
@@ -14,6 +15,7 @@ import {
   SPONSOR,
   VALIDATOR,
   admin,
+  airdropped,
   base,
   decodedProfile,
   profileAccounts,
@@ -23,23 +25,26 @@ import {
   refusal,
   rollup,
   send,
+  transferred,
   until,
 } from "./support";
 
-const MAX_DATA_LEN = 512;
+const MAX_DATA_LEN = 2048;
 const SPONSOR_FUNDING = 0.01 * LAMPORTS_PER_SOL;
+const SPONSOR_TOP_UP = 0.02 * LAMPORTS_PER_SOL;
 
 /** What the rollup charges to hold an account of `space` bytes. */
 const rollupRent = (space: number) => (space + 60) * 32;
 const profileSpace = (dataLen: number) => 54 + dataLen;
 const PERMISSION_SPACE = 35 + 2 * 33;
+const profileCost = (dataLen: number) =>
+  rollupRent(profileSpace(dataLen)) + rollupRent(PERMISSION_SPACE);
 
 const gate = Keypair.generate();
 const stranger = Keypair.generate();
 
 const settings = (over: { maxDataLen?: number; paused?: boolean } = {}) => ({
   gate: gate.publicKey,
-  validator: VALIDATOR,
   maxDataLen: MAX_DATA_LEN,
   paused: false,
   ...over,
@@ -47,67 +52,133 @@ const settings = (over: { maxDataLen?: number; paused?: boolean } = {}) => ({
 
 const record = (length: number, fill: number) => Buffer.alloc(length, fill);
 
-async function funded(key: Keypair, sol: number) {
-  const signature = await base.requestAirdrop(
-    key.publicKey,
-    sol * LAMPORTS_PER_SOL,
-  );
-  await base.confirmTransaction(
-    { signature, ...(await base.getLatestBlockhash()) },
-    "confirmed",
-  );
-}
+const asAdmin = (by: PublicKey) => ({ admin: by, sponsor: SPONSOR });
 
-const initialize = (
-  by: Keypair,
-  with_: ReturnType<typeof settings>,
-  lamports = SPONSOR_FUNDING,
-) =>
+const initialize = (by: PublicKey, with_: ReturnType<typeof settings>) =>
   program.methods
-    .initializeSponsor(with_, new BN(lamports))
+    .initializeSponsor(with_)
     .accountsPartial({
-      admin: by.publicKey,
-      sponsor: SPONSOR,
+      ...asAdmin(by),
       program: PROGRAM_ID,
       programData: PROGRAM_DATA,
-      systemProgram: SystemProgram.programId,
     })
-    .instruction();
-
-const create = (owner: PublicKey, data: Buffer, signedGate = gate.publicKey) =>
-  program.methods
-    .createProfile(data)
-    .accountsPartial({ gate: signedGate, ...profileAccounts(owner) })
-    .instruction();
-
-const write = (owner: PublicKey, expectedRevision: number, data: Buffer) =>
-  program.methods
-    .writeProfile(new BN(expectedRevision), data)
-    .accountsPartial({ gate: gate.publicKey, ...profileAccounts(owner) })
-    .instruction();
-
-const close = (owner: PublicKey) =>
-  program.methods
-    .closeProfile()
-    .accountsPartial(profileAccounts(owner))
     .instruction();
 
 const update = (by: PublicKey, with_: ReturnType<typeof settings>) =>
   program.methods
     .updateSponsor(with_)
-    .accountsPartial({ admin: by, sponsor: SPONSOR })
+    .accountsPartial(asAdmin(by))
     .instruction();
 
-const sponsorBalance = () => rollup.getBalance(SPONSOR);
+const delegate = (by: PublicKey) =>
+  program.methods
+    .delegateSponsor(VALIDATOR)
+    .accountsPartial(asAdmin(by))
+    .instruction();
+
+const undelegate = (by: PublicKey) =>
+  program.methods
+    .undelegateSponsor()
+    .accountsPartial(asAdmin(by))
+    .instruction();
+
+const withdraw = (by: PublicKey, lamports: number) =>
+  program.methods
+    .withdrawSponsor(new BN(lamports))
+    .accountsPartial(asAdmin(by))
+    .instruction();
+
+type ProfileAccounts = ReturnType<typeof profileAccounts>;
+
+/**
+ * Puts `data` where an instruction built around an empty record left room
+ * for it. The program's own client cannot encode more than a thousand bytes.
+ */
+function carrying(
+  instruction: TransactionInstruction,
+  data: Buffer,
+): TransactionInstruction {
+  const length = Buffer.alloc(4);
+  length.writeUInt32LE(data.length);
+  instruction.data = Buffer.concat([
+    instruction.data.subarray(0, -4),
+    length,
+    data,
+  ]);
+  return instruction;
+}
+
+const create = async (
+  owner: PublicKey,
+  data: Buffer,
+  over: Partial<ProfileAccounts> & { gate?: PublicKey } = {},
+) =>
+  carrying(
+    await program.methods
+      .createProfile(Buffer.alloc(0))
+      .accountsPartial({
+        gate: gate.publicKey,
+        ...profileAccounts(owner),
+        ...over,
+      })
+      .instruction(),
+    data,
+  );
+
+const write = async (
+  owner: PublicKey,
+  expectedRevision: number,
+  data: Buffer,
+  over: Partial<ProfileAccounts> = {},
+) =>
+  carrying(
+    await program.methods
+      .writeProfile(new BN(expectedRevision), Buffer.alloc(0))
+      .accountsPartial({
+        gate: gate.publicKey,
+        ...profileAccounts(owner),
+        ...over,
+      })
+      .instruction(),
+    data,
+  );
+
+const close = (owner: PublicKey, over: Partial<ProfileAccounts> = {}) =>
+  program.methods
+    .closeProfile()
+    .accountsPartial({ ...profileAccounts(owner), ...over })
+    .instruction();
+
+const sponsorOnRollup = () => rollup.getBalance(SPONSOR);
+const sponsorOnSolana = () => base.getBalance(SPONSOR);
+const sponsorRent = async () =>
+  base.getMinimumBalanceForRentExemption(
+    (await base.getAccountInfo(SPONSOR))!.data.length,
+  );
+
+const sponsorIsBackOnSolana = () =>
+  until(
+    async () => (await base.getAccountInfo(SPONSOR))?.owner.equals(PROGRAM_ID),
+    "the sponsor to return to Solana",
+  );
+
+const sponsorIsOnRollupWith = (lamports: number) =>
+  until(
+    async () => (await sponsorOnRollup()) === lamports,
+    `the sponsor to reach the rollup with ${lamports} lamports`,
+  );
 
 describe("the sponsor, on Solana", () => {
   before(async () => {
-    await Promise.all([funded(admin, 5), funded(stranger, 5)]);
+    await Promise.all([
+      airdropped(admin.publicKey, 5),
+      airdropped(stranger.publicKey, 5),
+    ]);
   });
 
   it("can only be set up by the program's upgrade authority", async () => {
     const error = await refusal(
-      send(base, await initialize(stranger, settings()), stranger),
+      send(base, await initialize(stranger.publicKey, settings()), stranger),
     );
     expect(error).to.include("NotUpgradeAuthority");
     expect(await base.getAccountInfo(SPONSOR)).to.equal(null);
@@ -116,28 +187,34 @@ describe("the sponsor, on Solana", () => {
   it("refuses a size limit of zero or above the hard maximum", async () => {
     for (const maxDataLen of [0, 4097]) {
       const error = await refusal(
-        send(base, await initialize(admin, settings({ maxDataLen })), admin),
+        send(
+          base,
+          await initialize(admin.publicKey, settings({ maxDataLen })),
+          admin,
+        ),
       );
       expect(error).to.include("InvalidSizeLimit");
     }
   });
 
-  it("is delegated to the rollup only by its admin", async () => {
-    await send(base, await initialize(admin, settings()), admin);
+  it("is funded by a plain transfer, from anyone", async () => {
+    await send(base, await initialize(admin.publicKey, settings()), admin);
+    await transferred(stranger, SPONSOR, SPONSOR_FUNDING);
 
-    const delegate = (by: PublicKey) =>
-      program.methods
-        .delegateSponsor()
-        .accountsPartial({ admin: by, sponsor: SPONSOR })
-        .instruction();
+    expect(await sponsorOnSolana()).to.equal(
+      (await sponsorRent()) + SPONSOR_FUNDING,
+    );
+  });
 
+  it("is delegated to the rollup only by its admin, with its whole balance", async () => {
     const error = await refusal(
       send(base, await delegate(stranger.publicKey), stranger),
     );
     expect(error).to.include("NotAdmin");
 
+    const balance = await sponsorOnSolana();
     await send(base, await delegate(admin.publicKey), admin);
-    await until(sponsorBalance, "the sponsor to reach the rollup");
+    await sponsorIsOnRollupWith(balance);
   });
 });
 
@@ -148,14 +225,14 @@ describe("a profile, on the rollup", () => {
   it("is created for an owner and a gate that hold no SOL, and costs the sponsor only its rent", async () => {
     expect(await base.getBalance(owner.publicKey)).to.equal(0);
     expect(await base.getBalance(gate.publicKey)).to.equal(0);
-    const before = await sponsorBalance();
+    const before = await sponsorOnRollup();
 
     await send(rollup, await create(owner.publicKey, first), gate, [owner]);
 
-    expect(before - (await sponsorBalance())).to.equal(
-      rollupRent(profileSpace(first.length)) + rollupRent(PERMISSION_SPACE),
-    );
+    expect(before - (await sponsorOnRollup())).to.equal(18_400);
+    expect(profileCost(first.length)).to.equal(18_400);
     const stored = await decodedProfile(rollup, owner.publicKey);
+    expect(stored?.layout).to.equal(1);
     expect(stored?.owner.equals(owner.publicKey)).to.equal(true);
     expect(stored?.revision).to.equal(1n);
     expect(stored?.data.equals(first)).to.equal(true);
@@ -164,19 +241,17 @@ describe("a profile, on the rollup", () => {
   it("is readable through the private endpoint by its owner and by nobody else", async () => {
     const address = profileOf(owner.publicKey);
 
-    const asOwner = await readingAs(owner);
-    const mine = await decodedProfile(asOwner, owner.publicKey);
+    const mine = await decodedProfile(await readingAs(owner), owner.publicKey);
     expect(mine?.data.equals(first)).to.equal(true);
 
-    const asStranger = await readingAs(stranger);
-    expect(await asStranger.getAccountInfo(address)).to.equal(null);
-
-    const unsigned = new Connection(PRIVATE_URL, "confirmed");
-    const withoutToken = await unsigned.getAccountInfo(address).then(
-      (account) => account,
-      () => null,
-    );
-    expect(withoutToken).to.equal(null);
+    // The query filter answers a reader it will not serve as if the account
+    // did not exist. Each such reader is first shown to reach the endpoint,
+    // through an account anyone may read, so an outage cannot pass for privacy.
+    const withoutToken = new Connection(PRIVATE_URL, "confirmed");
+    for (const reader of [await readingAs(stranger), withoutToken]) {
+      expect(await reader.getAccountInfo(SPONSOR)).to.not.equal(null);
+      expect(await reader.getAccountInfo(address)).to.equal(null);
+    }
   });
 
   it("is not created without the gate's signature", async () => {
@@ -184,7 +259,7 @@ describe("a profile, on the rollup", () => {
     const error = await refusal(
       send(
         rollup,
-        await create(other.publicKey, first, stranger.publicKey),
+        await create(other.publicKey, first, { gate: stranger.publicKey }),
         stranger,
         [other],
       ),
@@ -215,12 +290,55 @@ describe("a profile, on the rollup", () => {
     }
   });
 
-  it("grows and shrinks with what is written, and the sponsor pays or is repaid the difference", async () => {
-    const larger = record(450, 9);
-    const before = await sponsorBalance();
+  it("is neither written nor closed before it exists", async () => {
+    const other = Keypair.generate();
+    expect(
+      await refusal(
+        send(rollup, await write(other.publicKey, 1, first), gate, [other]),
+      ),
+    ).to.include("ProfileMissing");
+    expect(
+      await refusal(send(rollup, await close(other.publicKey), gate, [other])),
+    ).to.include("ProfileMissing");
+  });
+
+  it("is neither created nor closed with a permission account that is not its own", async () => {
+    const other = Keypair.generate();
+    const spoofed = {
+      permission: permissionPdaFromAccount(profileOf(other.publicKey)),
+    };
+    const before = await sponsorOnRollup();
+
+    expect(
+      await refusal(
+        send(
+          rollup,
+          await create(other.publicKey, first, {
+            permission: profileAccounts(owner.publicKey).permission,
+          }),
+          gate,
+          [other],
+        ),
+      ),
+    ).to.include("ConstraintSeeds");
+    expect(await decodedProfile(rollup, other.publicKey)).to.equal(null);
+
+    expect(
+      await refusal(
+        send(rollup, await close(owner.publicKey, spoofed), gate, [owner]),
+      ),
+    ).to.include("ConstraintSeeds");
+    const stored = await decodedProfile(rollup, owner.publicKey);
+    expect(stored?.data.equals(first)).to.equal(true);
+    expect(await sponsorOnRollup()).to.equal(before);
+  });
+
+  it("grows past what one Solana transaction could carry, shrinks again, and the sponsor pays or is repaid the difference", async () => {
+    const larger = record(2000, 9);
+    const before = await sponsorOnRollup();
     await send(rollup, await write(owner.publicKey, 1, larger), gate, [owner]);
 
-    expect(before - (await sponsorBalance())).to.equal(
+    expect(before - (await sponsorOnRollup())).to.equal(
       (larger.length - first.length) * 32,
     );
     let stored = await decodedProfile(rollup, owner.publicKey);
@@ -230,7 +348,7 @@ describe("a profile, on the rollup", () => {
     const smaller = record(120, 3);
     await send(rollup, await write(owner.publicKey, 2, smaller), gate, [owner]);
 
-    expect(before - (await sponsorBalance())).to.equal(
+    expect(before - (await sponsorOnRollup())).to.equal(
       (smaller.length - first.length) * 32,
     );
     stored = await decodedProfile(rollup, owner.publicKey);
@@ -253,26 +371,27 @@ describe("a profile, on the rollup", () => {
 
   it("cannot be written or closed by another key, even with the gate's signature", async () => {
     const attacker = Keypair.generate();
-    const victim = profileAccounts(owner.publicKey);
     const aimedAtVictim = {
-      ...victim,
+      ...profileAccounts(owner.publicKey),
       owner: attacker.publicKey,
     };
 
-    const writing = await program.methods
-      .writeProfile(new BN(3), record(20, 6))
-      .accountsPartial({ gate: gate.publicKey, ...aimedAtVictim })
-      .instruction();
     expect(
-      await refusal(send(rollup, writing, gate, [attacker])),
+      await refusal(
+        send(
+          rollup,
+          await write(attacker.publicKey, 3, record(20, 6), aimedAtVictim),
+          gate,
+          [attacker],
+        ),
+      ),
     ).to.include("ConstraintSeeds");
-
-    const closing = await program.methods
-      .closeProfile()
-      .accountsPartial(aimedAtVictim)
-      .instruction();
     expect(
-      await refusal(send(rollup, closing, gate, [attacker])),
+      await refusal(
+        send(rollup, await close(attacker.publicKey, aimedAtVictim), gate, [
+          attacker,
+        ]),
+      ),
     ).to.include("ConstraintSeeds");
 
     const stored = await decodedProfile(rollup, owner.publicKey);
@@ -309,18 +428,14 @@ describe("a profile, on the rollup", () => {
   });
 
   it("is closed by its owner alone, even while paused, and the sponsor gets all its rent back", async () => {
-    const address = profileOf(owner.publicKey);
-    const before = await sponsorBalance();
+    const before = await sponsorOnRollup();
 
     await send(rollup, await close(owner.publicKey), owner);
 
-    expect((await sponsorBalance()) - before).to.equal(
-      rollupRent(profileSpace(120)) + rollupRent(PERMISSION_SPACE),
-    );
-    expect(await rollup.getAccountInfo(address)).to.equal(null);
-    expect(
-      await rollup.getAccountInfo(profileAccounts(owner.publicKey).permission),
-    ).to.equal(null);
+    expect((await sponsorOnRollup()) - before).to.equal(profileCost(120));
+    const { profile, permission } = profileAccounts(owner.publicKey);
+    expect(await rollup.getAccountInfo(profile)).to.equal(null);
+    expect(await rollup.getAccountInfo(permission)).to.equal(null);
   });
 
   it("can be created again after it was closed, starting from revision one", async () => {
@@ -342,20 +457,110 @@ describe("a profile, on the rollup", () => {
   });
 });
 
-describe("the sponsor, back on Solana", () => {
-  const withdraw = (by: PublicKey, lamports: number) =>
-    program.methods
-      .withdrawSponsor(new BN(lamports))
-      .accountsPartial({ admin: by, sponsor: SPONSOR })
-      .instruction();
+describe("the sponsor, topped up on Solana while a profile stays open", () => {
+  const owner = Keypair.generate();
+  const newcomer = Keypair.generate();
+  const kept = record(300, 4);
+  let funded: number;
 
-  it("is undelegated only by its admin, with every lamport it was funded with", async () => {
-    const undelegate = (by: PublicKey) =>
-      program.methods
-        .undelegateSponsor()
-        .accountsPartial({ admin: by, sponsor: SPONSOR })
-        .instruction();
+  before(async () => {
+    funded = await sponsorOnRollup();
+    await send(rollup, await create(owner.publicKey, kept), gate, [owner]);
+  });
 
+  it("cannot be paid out while it is on the rollup, whoever pays the fee", async () => {
+    for (const [feePayer, reason] of [
+      [admin, "InvalidAccountForFee"],
+      [gate, "InvalidWritableAccount"],
+    ] as const) {
+      const error = await refusal(
+        send(rollup, await withdraw(admin.publicKey, 1000), feePayer, [admin]),
+      );
+      expect(error).to.include(reason);
+    }
+    expect(await sponsorOnRollup()).to.equal(funded - profileCost(kept.length));
+  });
+
+  it("returns to Solana with everything but the rent of the open profile", async () => {
+    await send(rollup, await undelegate(admin.publicKey), admin);
+    await sponsorIsBackOnSolana();
+
+    expect(await sponsorOnSolana()).to.equal(funded - profileCost(kept.length));
+  });
+
+  it("leaves the open profile readable while it is away, and nothing can be created, written or closed", async () => {
+    for (const [instruction, signer] of [
+      [await create(newcomer.publicKey, kept), newcomer],
+      [await write(owner.publicKey, 1, record(10, 1)), owner],
+      [await close(owner.publicKey), owner],
+    ] as const) {
+      const error = await refusal(send(rollup, instruction, gate, [signer]));
+      expect(error).to.include("InvalidWritableAccount");
+    }
+    expect(await decodedProfile(rollup, newcomer.publicKey)).to.equal(null);
+
+    const mine = await decodedProfile(await readingAs(owner), owner.publicKey);
+    expect(mine?.revision).to.equal(1n);
+    expect(mine?.data.equals(kept)).to.equal(true);
+  });
+
+  it("takes a plain transfer on Solana and carries it back to the rollup", async () => {
+    await transferred(admin, SPONSOR, SPONSOR_TOP_UP);
+    const balance = await sponsorOnSolana();
+    expect(balance).to.equal(
+      funded - profileCost(kept.length) + SPONSOR_TOP_UP,
+    );
+
+    await send(base, await delegate(admin.publicKey), admin);
+    await sponsorIsOnRollupWith(balance);
+  });
+
+  it("still lets the owner read and write the profile that was open", async () => {
+    const mine = await decodedProfile(await readingAs(owner), owner.publicKey);
+    expect(mine?.revision).to.equal(1n);
+    expect(mine?.data.equals(kept)).to.equal(true);
+
+    const rewritten = record(310, 5);
+    const before = await sponsorOnRollup();
+    await send(rollup, await write(owner.publicKey, 1, rewritten), gate, [
+      owner,
+    ]);
+
+    expect(before - (await sponsorOnRollup())).to.equal(
+      (rewritten.length - kept.length) * 32,
+    );
+    const stored = await decodedProfile(
+      await readingAs(owner),
+      owner.publicKey,
+    );
+    expect(stored?.revision).to.equal(2n);
+    expect(stored?.data.equals(rewritten)).to.equal(true);
+  });
+
+  it("pays for a new profile, and is repaid when both are closed", async () => {
+    const data = record(200, 8);
+    const before = await sponsorOnRollup();
+    await send(rollup, await create(newcomer.publicKey, data), gate, [
+      newcomer,
+    ]);
+
+    expect(before - (await sponsorOnRollup())).to.equal(
+      profileCost(data.length),
+    );
+    const theirs = await decodedProfile(
+      await readingAs(newcomer),
+      newcomer.publicKey,
+    );
+    expect(theirs?.data.equals(data)).to.equal(true);
+
+    await send(rollup, await close(newcomer.publicKey), newcomer);
+    await send(rollup, await close(owner.publicKey), owner);
+    expect(await sponsorOnRollup()).to.equal(funded + SPONSOR_TOP_UP);
+  });
+});
+
+describe("the sponsor, back on Solana for good", () => {
+  it("is undelegated only by its admin, with every lamport it was given", async () => {
     expect(
       await refusal(
         send(rollup, await undelegate(stranger.publicKey), stranger),
@@ -363,20 +568,15 @@ describe("the sponsor, back on Solana", () => {
     ).to.include("NotAdmin");
 
     await send(rollup, await undelegate(admin.publicKey), admin);
-    await until(
-      async () =>
-        (await base.getAccountInfo(SPONSOR))?.owner.equals(PROGRAM_ID),
-      "the sponsor to return to Solana",
-      60_000,
-    );
+    await sponsorIsBackOnSolana();
 
-    const rent = await base.getMinimumBalanceForRentExemption(
-      (await base.getAccountInfo(SPONSOR))!.data.length,
+    expect(await sponsorOnSolana()).to.equal(
+      (await sponsorRent()) + SPONSOR_FUNDING + SPONSOR_TOP_UP,
     );
-    expect(await base.getBalance(SPONSOR)).to.equal(rent + SPONSOR_FUNDING);
   });
 
   it("pays out to its admin only, and never below its own rent", async () => {
+    const held = SPONSOR_FUNDING + SPONSOR_TOP_UP;
     expect(
       await refusal(
         send(base, await withdraw(stranger.publicKey, 1), stranger),
@@ -384,12 +584,16 @@ describe("the sponsor, back on Solana", () => {
     ).to.include("NotAdmin");
     expect(
       await refusal(
-        send(base, await withdraw(admin.publicKey, SPONSOR_FUNDING + 1), admin),
+        send(base, await withdraw(admin.publicKey, held + 1), admin),
       ),
     ).to.include("BelowRent");
 
-    const before = await base.getBalance(SPONSOR);
-    await send(base, await withdraw(admin.publicKey, SPONSOR_FUNDING), admin);
-    expect(before - (await base.getBalance(SPONSOR))).to.equal(SPONSOR_FUNDING);
+    const adminBefore = await base.getBalance(admin.publicKey);
+    await send(base, await withdraw(admin.publicKey, held), admin);
+
+    expect(await sponsorOnSolana()).to.equal(await sponsorRent());
+    expect((await base.getBalance(admin.publicKey)) - adminBefore).to.equal(
+      held - 5000,
+    );
   });
 });

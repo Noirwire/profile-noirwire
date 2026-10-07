@@ -1,9 +1,14 @@
 use anchor_lang::prelude::*;
 
+use crate::errors::ProfileError;
+
 pub const SPONSOR_SEED: &[u8] = b"sponsor";
 pub const PROFILE_SEED: &[u8] = b"profile";
 
-pub const SPONSOR_LAYOUT: u8 = 1;
+/// The seed the permission program derives a permission's address from,
+/// followed by the address of the account it guards.
+pub const PERMISSION_SEED: &[u8] = b"permission:";
+
 pub const PROFILE_LAYOUT: u8 = 1;
 
 /// The largest record any deployment may allow. A sponsor sets its own limit at or under this.
@@ -17,19 +22,33 @@ pub const HARD_MAX_DATA_LEN: u16 = 4096;
 #[account]
 #[derive(InitSpace)]
 pub struct Sponsor {
-    pub layout: u8,
     pub bump: u8,
     /// May change the settings, delegate, undelegate and withdraw.
     pub admin: Pubkey,
     /// Must sign every instruction that can spend rent. Held by the service
     /// that rate limits profile creation, so a stranger cannot drain the sponsor.
     pub gate: Pubkey,
-    /// The rollup validator this sponsor is delegated to.
-    pub validator: Pubkey,
     /// The largest record a profile may hold, in bytes.
     pub max_data_len: u16,
     /// While set, no profile is created or written. Closing stays open.
     pub paused: bool,
+}
+
+impl Sponsor {
+    pub fn signer_seeds(&self) -> [&[u8]; 2] {
+        [SPONSOR_SEED, std::slice::from_ref(&self.bump)]
+    }
+
+    /// Whether this deployment will pay to store `data` right now.
+    pub fn accepts(&self, data: &[u8]) -> Result<()> {
+        require!(!self.paused, ProfileError::Paused);
+        require!(!data.is_empty(), ProfileError::EmptyRecord);
+        require!(
+            data.len() <= self.max_data_len as usize,
+            ProfileError::RecordTooLarge
+        );
+        Ok(())
+    }
 }
 
 /// One wallet's record. It exists only inside the private rollup.
@@ -49,7 +68,38 @@ pub struct Profile {
 impl Profile {
     const FIXED_LEN: usize = 8 + 1 + 1 + 32 + 8 + 4;
 
-    pub const fn space_for(data_len: usize) -> usize {
-        Self::FIXED_LEN + data_len
+    pub fn first(owner: Pubkey, bump: u8, data: Vec<u8>) -> Self {
+        Self {
+            layout: PROFILE_LAYOUT,
+            bump,
+            owner,
+            revision: 1,
+            data,
+        }
+    }
+
+    /// The record that replaces this one, but only for a writer who read this revision.
+    pub fn next(self, expected_revision: u64, data: Vec<u8>) -> Result<Self> {
+        require!(
+            self.revision == expected_revision,
+            ProfileError::StaleRevision
+        );
+        Ok(Self {
+            revision: self.revision.checked_add(1).ok_or(ProfileError::Overflow)?,
+            data,
+            ..self
+        })
+    }
+
+    pub fn space(&self) -> usize {
+        Self::FIXED_LEN + self.data.len()
+    }
+
+    pub fn signer_seeds(&self) -> [&[u8]; 3] {
+        [
+            PROFILE_SEED,
+            self.owner.as_ref(),
+            std::slice::from_ref(&self.bump),
+        ]
     }
 }

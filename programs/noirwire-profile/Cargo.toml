@@ -22,8 +22,9 @@ custom-heap = []
 custom-panic = []
 
 [dependencies]
-anchor-lang = "=1.0.2"
-ephemeral-rollups-sdk = { version = "=0.16.2", features = ["anchor", "access-control"] }
+anchor-lang = "=1.2.1"
+ephemeral-rollups-sdk = { version = "=0.17.3", features = ["anchor", "access-control"] }
+solana-security-txt = "=1.1.3"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [
