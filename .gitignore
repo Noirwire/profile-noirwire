@@ -1,0 +1,15 @@
+.anchor
+.DS_Store
+target
+**/*.rs.bk
+node_modules
+test-ledger
+.yarn
+.env
+.env.*
+
+# Keypairs. A Solana secret key is a 64-byte JSON array; never commit one.
+*.json.key
+.deploy-wallet.json
+*-keypair.json
+id.json
