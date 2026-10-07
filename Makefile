@@ -10,6 +10,11 @@
 #   make verify-build   build the program reproducibly, in a container
 #   make clean          remove the local network and build leftovers
 #
+#   make devnet-setup   make the gate key, set up, fund and delegate the sponsor
+#   make devnet-status  show the sponsor on Solana and on the rollup
+#   make devnet-smoke   prove create, read, write and close on the live rollup
+#   make devnet-canary  check the profile the smoke run left open is still there
+#
 # The local network is a Solana validator, a private rollup and its query
 # filter:  client -> query filter (6699) -> rollup (7799) -> Solana (8899).
 # Everything it writes lives under .localnet, which git ignores.
@@ -26,6 +31,9 @@ AVM_ANCHOR := $(HOME)/.avm/bin/anchor-$(ANCHOR_VERSION)
 ANCHOR ?= $(if $(wildcard $(AVM_ANCHOR)),$(AVM_ANCHOR),anchor)
 SBPF_ARCH := v0
 SOLANA_VERIFY_VERSION := 0.5.2
+# The build image the reproducible build runs in. The image for the Solana
+# version the tests use carries a Cargo too old for this program.
+VERIFY_IMAGE := solanafoundation/solana-verifiable-build:3.1.14
 
 LOCALNET := .localnet
 PROGRAM_ID := $(shell sed -n 's/^noirwire_profile = "\(.*\)"/\1/p' Anchor.toml)
@@ -44,7 +52,8 @@ STACK = cd $(LOCALNET) && exec npx mb-stack --reset --ledger ledger \
 	--upgradeable-program $(PROGRAM_ID) ../$(PROGRAM_SO) \
 		$$(solana-keygen pubkey admin.json)
 
-.PHONY: help install build pinned-anchor fresh stack test check format audit verify-build clean
+.PHONY: help install build pinned-anchor fresh stack test check format audit verify-build clean \
+	devnet-setup devnet-status devnet-smoke devnet-canary
 
 help:
 	@grep -E '^#( |$$)' Makefile | sed -E 's/^# ?//' | sed '/^The Anchor version/,$$d'
@@ -108,8 +117,28 @@ audit:
 verify-build:
 	@[ "$$(solana-verify --version 2>/dev/null)" = "solana-verify $(SOLANA_VERIFY_VERSION)" ] || { \
 		echo "This build is verified with solana-verify $(SOLANA_VERIFY_VERSION) only: run 'cargo install solana-verify --locked --version $(SOLANA_VERIFY_VERSION)'." >&2; exit 1; }
-	solana-verify build --library-name noirwire_profile --arch $(SBPF_ARCH)
+	solana-verify build --library-name noirwire_profile --arch $(SBPF_ARCH) --base-image $(VERIFY_IMAGE)
 	solana-verify get-executable-hash $(PROGRAM_SO)
+
+# A deployment on a public network is operated by ops/network.ts, which is
+# told the network through these variables and checks the genesis hash and
+# the rollup's identity before it sends anything. Keys live under .keys,
+# which git ignores: <network>-admin.json is put there by hand, the gate and
+# the canary keys are made on first use. Only devnet is wired up.
+OPS := node_modules/.bin/ts-node -P tsconfig.json ops/network.ts
+IDL := target/idl/noirwire_profile.json
+DEVNET := NETWORK=devnet KEYS_DIR=.keys \
+	SOLANA_URL=https://api.devnet.solana.com \
+	GENESIS=EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG \
+	ROLLUP_URL=https://devnet-tee.magicblock.app \
+	VALIDATOR=MTEWGuqxUpYZGFJQcp8tLN7x5v9BSeoFHYWQQ3n3xzo \
+	SPONSOR_FLOAT_LAMPORTS=50000000 MAX_DATA_LEN=2048
+
+$(IDL):
+	$(MAKE) build
+
+devnet-setup devnet-status devnet-smoke devnet-canary: devnet-%: $(IDL)
+	@$(DEVNET) $(OPS) $*
 
 clean:
 	rm -rf $(LOCALNET) target/debug target/release target/sbpf-solana-solana

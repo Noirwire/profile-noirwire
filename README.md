@@ -35,10 +35,14 @@ Not this program's to guarantee:
 - **Durability** is the rollup's. A profile exists only inside the rollup and is never committed to Solana. The device's own wallet record stays the truth; this is a mirror.
 - **Rate limiting** is the gate holder's. The program checks that the gate signed, not how often.
 
-Not proven by the local tests:
+Proven on devnet as well, by one live run against MagicBlock's devnet private rollup (see [Devnet deployment](#devnet-deployment)): create, owner-only read, revisions, a 2,000-byte record in one transaction, close, and the exact rent.
 
-- That a record survives a restart of the rollup validator.
-- Behaviour on the public devnet and mainnet private validators. Every test here runs against a local stack.
+Not proven anywhere:
+
+- That a record survives a restart of the rollup validator, or for how long the devnet rollup keeps one. `make devnet-canary` checks the one profile the live run left open; a single later check says little about months.
+- Behaviour on mainnet. Nothing here has been sent to it.
+- The sponsor procedures on devnet: pause, admin hand-over, undelegate, top-up and withdraw have only been run on the local stack.
+- Behaviour under load, or with many profiles open.
 
 This program has not had a third-party audit.
 
@@ -54,6 +58,8 @@ programs/noirwire-profile/src/
 tests/
   profile.test.ts          the behaviour, as sentences
   support.ts               connections, addresses and one helper per repeated action
+ops/
+  network.ts               operates a deployment on a public network; the tests send with its helpers
 Makefile                   the only entry point
 ```
 
@@ -124,9 +130,62 @@ make audit          # cargo audit over Cargo.lock
 make verify-build   # reproducible build in a container, and its hash
 ```
 
-`make test` starts a Solana validator, a private rollup and its query filter on ports 8899, 8900, 7799, 7800, 6699, 6700 and 9900, runs every test against them and stops them. Nothing in this repository sends a transaction to a public network. The program is loaded at its declared address with a throwaway key under `.localnet` as its upgrade authority, so no real key is needed to build or test.
+`make test` starts a Solana validator, a private rollup and its query filter on ports 8899, 8900, 7799, 7800, 6699, 6700 and 9900, runs every test against them and stops them. `make build`, `make test` and `make check` never reach a public network; only the `devnet-` targets do. The program is loaded at its declared address with a throwaway key under `.localnet` as its upgrade authority, so no real key is needed to build or test.
 
 CI runs the same targets on every push and pull request: `make check`, `make audit`, `make build`, `make test`.
+
+## Devnet deployment
+
+The program runs on Solana devnet, with its profiles on MagicBlock's devnet private rollup.
+
+| What              | Where                                                                       |
+| ----------------- | --------------------------------------------------------------------------- |
+| Program           | `AiS6fT2x5XELHvZPrLfdzydC9xUazjS6r4z4bNDTqtHQ`                              |
+| Sponsor           | `6Yq7mnKZYiHv2HFU3wo3JQsBZdQLFiBxycCaX5Sf9frZ`                              |
+| Gate (public key) | `7TGo6BsWkmuDY8Jv3qrp7fRnzton5ngmeaq1kqAP6j9t`                              |
+| Solana RPC        | `https://api.devnet.solana.com`                                             |
+| Private rollup    | `https://devnet-tee.magicblock.app`, with `?token=` from its login          |
+| Rollup validator  | `MTEWGuqxUpYZGFJQcp8tLN7x5v9BSeoFHYWQQ3n3xzo`, confirmed with `getIdentity` |
+| Record size limit | 2,048 bytes                                                                 |
+
+Four targets operate it. They run `ops/network.ts`, which checks the network's genesis hash before anything else, never prints a secret key, and keeps its keys under `.keys`, which git ignores. `.keys/devnet-admin.json`, the program's upgrade authority, is put there by hand.
+
+```sh
+make devnet-setup    # safe to repeat: makes .keys/devnet-gate.json if missing, initializes the
+                     # sponsor if there is none, funds it to 0.05 SOL above its rent, confirms the
+                     # rollup's identity and delegates the sponsor to it
+make devnet-status   # the sponsor on Solana and on the rollup: balance, settings, gate public
+                     # key, whether it is delegated and to which validator
+make devnet-smoke    # the live test below, with throwaway owner keys made in memory
+make devnet-canary   # reads the one profile the smoke run left open, as its owner, and says
+                     # whether it is still there, at which revision, and what the sponsor holds
+```
+
+Once the sponsor is delegated, `devnet-setup` changes nothing more. Topping it up is the procedure under [Topping up the sponsor](#topping-up-the-sponsor), by hand.
+
+### What the live run proved
+
+One run of `make devnet-smoke`, every check passing:
+
+- A profile was created for an owner and a gate that hold no SOL on Solana or on the rollup, and the sponsor was charged exactly 18,400 lamports for a 300-byte record.
+- The owner read it back with its own token. A stranger's token got `null` for it, while reading the sponsor through the same endpoint.
+- A read with no token was answered HTTP 200 with `"value": null`: not refused, answered as if the account did not exist. The sponsor is readable without a token.
+- A write on the current revision landed. A second write on the old revision was refused with `StaleRevision` and changed nothing.
+- A 2,000-byte record was accepted in one transaction, and the sponsor's total charge was exactly 72,800 lamports.
+- Closing returned every lamport: the sponsor's balance was back where it started.
+- One profile was left open as the canary. It costs the sponsor 18,400 lamports while it stays.
+
+Timings from that run, three samples each, measured from one machine in Europe:
+
+| Action | Samples          | What is timed                                                    |
+| ------ | ---------------- | ---------------------------------------------------------------- |
+| create | 776, 647, 659 ms | fetch a blockhash, send, and see it confirmed: three round trips |
+| write  | 616, 622, 611 ms | the same                                                         |
+| read   | 199, 199, 201 ms | one `getAccountInfo` with a token                                |
+
+Nothing behaved differently from the local stack: the same instructions, the same errors, the same rent, the same answer to a read without a token, and the `--arch v0` build loaded on both.
+
+What it did not prove is listed under [What it guarantees, and what it does not](#what-it-guarantees-and-what-it-does-not).
 
 ## Deploying
 
@@ -142,7 +201,7 @@ Nothing here deploys by itself. These are the steps, in order, for devnet first 
      --library-name noirwire_profile --arch v0 --commit-hash <commit> https://github.com/Noirwire/profile-noirwire
    ```
 
-   What was not tested: the reproducible build itself has not completed once. The build image for Solana 2.3.11 carries a Cargo too old for one of this program's dependencies and stops there, so `make verify-build` needs a newer base image named with `solana-verify build --base-image`, and that image, and the hash it gives twice in a row, are still to be established. Do this before the first deploy; until it is done the deployed program cannot be tied to a commit.
+   What was tested: the program built twice in the image `make verify-build` names (`solanafoundation/solana-verifiable-build:3.1.14`) gave the same file both times. The image for Solana 2.3.11 cannot build it: its Cargo is too old for one dependency. What was not tested: `solana-verify` itself was not run, only the build it performs inside that image, and no deployed program has been tied to a commit yet. The devnet deployment was made from a local build, so it is not a verified one.
 
 2. **Set up the sponsor**, with the deploy key, while it is still the upgrade authority: only the upgrade authority may initialize, and the signer becomes the sponsor's admin.
    - `initialize_sponsor({ gate, max_data_len, paused: false })` on Solana.
