@@ -12,11 +12,9 @@ import {
   EPHEMERAL_VAULT_ID,
   MAGIC_PROGRAM_ID,
   PERMISSION_PROGRAM_ID,
-  getAuthToken,
   permissionPdaFromAccount,
 } from "@magicblock-labs/ephemeral-rollups-sdk";
-import nacl from "tweetnacl";
-import { send } from "../ops/network";
+import { connectionAs, heldKey, send } from "../ops/network";
 
 /** Sending, waiting and expecting a refusal are the same on every network. */
 export { refusal, send, until } from "../ops/network";
@@ -36,13 +34,7 @@ export const VALIDATOR = new PublicKey(
 export const base = new Connection(BASE_URL, "confirmed");
 export const rollup = new Connection(ROLLUP_URL, "confirmed");
 
-export const admin = Keypair.fromSecretKey(
-  Uint8Array.from(
-    JSON.parse(
-      readFileSync(join(process.cwd(), ".localnet/admin.json"), "utf8"),
-    ),
-  ),
-);
+export const admin = heldKey(join(process.cwd(), ".localnet/admin.json"));
 
 const readOnlyWallet = new anchor.Wallet(Keypair.generate());
 export const program = new anchor.Program(
@@ -103,13 +95,8 @@ export async function airdropped(to: PublicKey, sol: number) {
 }
 
 /** A connection to the private endpoint that reads as `reader`. */
-export async function readingAs(reader: Keypair): Promise<Connection> {
-  const { token } = await getAuthToken(
-    PRIVATE_URL,
-    reader.publicKey,
-    async (message) => nacl.sign.detached(message, reader.secretKey),
-  );
-  return new Connection(`${PRIVATE_URL}?token=${token}`, "confirmed");
+export function readingAs(reader: Keypair): Promise<Connection> {
+  return connectionAs(PRIVATE_URL, reader);
 }
 
 /** The sponsor as it is stored wherever `connection` looks. */

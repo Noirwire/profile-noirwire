@@ -168,10 +168,21 @@ function setting(name: string): string {
   return value;
 }
 
-function heldKey(path: string): Keypair {
+export function heldKey(path: string): Keypair {
   return Keypair.fromSecretKey(
     Uint8Array.from(JSON.parse(readFileSync(path, "utf8"))),
   );
+}
+
+/** A connection to a private endpoint that reads and sends as `reader`. */
+export async function connectionAs(
+  url: string,
+  reader: Keypair,
+): Promise<Connection> {
+  const { token } = await getAuthToken(url, reader.publicKey, async (message) =>
+    nacl.sign.detached(message, reader.secretKey),
+  );
+  return new Connection(`${url}?token=${token}`, "confirmed");
 }
 
 /** Keeps a new key in a file only its owner can read, and never overwrites one. */
@@ -218,14 +229,7 @@ async function deployment() {
   )[0];
 
   /** A connection to the private rollup that reads and sends as `reader`. */
-  const rollupAs = async (reader: Keypair) => {
-    const { token } = await getAuthToken(
-      rollupUrl,
-      reader.publicKey,
-      async (message) => nacl.sign.detached(message, reader.secretKey),
-    );
-    return new Connection(`${rollupUrl}?token=${token}`, "confirmed");
-  };
+  const rollupAs = (reader: Keypair) => connectionAs(rollupUrl, reader);
 
   const discriminator = (name: string) =>
     Buffer.from(
