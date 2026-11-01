@@ -1,6 +1,8 @@
 <h1 align="center">profile-noirwire</h1>
 <p align="center">The on-chain program that keeps a NoirWire wallet's own labels, as ciphertext, on a private rollup.</p>
 
+This profile program runs on devnet. Separately, NoirWire Dark Pool trades SOL-PERP on Solana mainnet at https://terminal.noirwire.com.
+
 <p align="center">
   <a href="https://github.com/Noirwire/profile-noirwire/actions/workflows/ci.yml"><img src="https://github.com/Noirwire/profile-noirwire/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
   <img src="https://img.shields.io/badge/license-proprietary-black" alt="License">
